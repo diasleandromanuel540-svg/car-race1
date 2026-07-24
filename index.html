@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>3D Car Racing - Single File</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { margin: 0; height: 100%; background: #101216; }
+    canvas { display: block; }
+    #hud {
+      position: absolute; top: 12px; left: 12px; color: #eee;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: rgba(0,0,0,0.35); padding: 8px 12px; border-radius: 8px;
+      line-height: 1.3; font-size: 14px;
+    }
+    #hud b { color: #fff; }
+    #credit {
+      position: absolute; bottom: 10px; right: 12px; color: #bbb; font-size: 12px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: rgba(0,0,0,0.25); padding: 6px 10px; border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div><b>Controls</b>: W/Up = accelerate, S/Down = brake/reverse, A/Left = steer left, D/Right = steer right</div>
+    <div>R = reset car</div>
+  </div>
+  <div id="credit">Car model from three.js examples (Ferrari 458 Italia)</div>
+
+  <!-- Three.js and loaders from unpkg CDN -->
+  <script src="[unpkg.com](https://unpkg.com/three@0.160.0/build/three.min.js)"></script>
+  <script src="[unpkg.com](https://unpkg.com/three@0.160.0/examples/js/loaders/GLTFLoader.js)"></script>
+  <script src="[unpkg.com](https://unpkg.com/three@0.160.0/examples/js/controls/OrbitControls.js)"></script>
+
+  <script>
+  ;(function () {
+    // Basic scene setup
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x101216);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    document.body.appendChild(renderer.domElement);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 2000);
+    camera.position.set(0, 6, 14);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.enablePan = false;
+    controls.minDistance = 5;
+    controls.maxDistance = 40;
+    controls.maxPolarAngle = Math.PI * 0.49; // keep above horizon
+
+    // Lights
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x202028, 0.6);
+    scene.add(hemi);
+
+    const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+    sun.position.set(10, 20, 5);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    sun.shadow.camera.near = 1;
+    sun.shadow.camera.far = 60;
+    sun.shadow.camera.left = -30;
+    sun.shadow.camera.right = 30;
+    sun.shadow.camera.top = 30;
+    sun.shadow.camera.bottom = -30;
+    scene.add(sun);
+
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    // Ground plane (to catch shadows)
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x0b0d10, roughness: 1, metalness: 0 });
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), groundMat);
+    ground.rotation.x = -Math.PI/2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Build a straight "track loop" composed of four long segments forming a rectangle
+    // Visual style:
+    // - Gray asphalt
+    // - White center line
+    // - Red/white striped edges
+    const trackGroup = new THREE.Group();
+    scene.add(trackGroup);
+
+    function makeRoadSegment(length = 200, width = 8) {
+      const group = new THREE.Group();
+
+      // Asphalt
+      const roadGeo = new THREE.BoxGeometry(length, 0.1, width);
+      const roadMat = new THREE.MeshStandardMaterial({ color: 0x4a4a4a, roughness: 0.95 });
+      const road = new THREE.Mesh(roadGeo, roadMat);
+      road.castShadow = false;
+      road.receiveShadow = true;
+      group.add(road);
+
+      // Center white dashed line
+      const dashCount = Math.floor(length / 6);
+      for (let i = 0; i < dashCount; i++) {
+        const dash = new THREE.Mesh(
+          new THREE.BoxGeometry(2.5, 0.12, 0.15),
+          new THREE.MeshBasicMaterial({ color: 0xffffff })
+        );
+        const x = -length/2 + i * (length / dashCount) + 1.25;
+        dash.position.set(x, 0.06, 0);
+        group.add(dash);
+      }
+
+      // Edge stripes: alternating red/white small rectangles along both sides
+      const stripeCount = Math.floor(length / 3.0);
+      for (let i = 0; i < stripeCount; i++) {
+        const color = (i % 2 === 0) ? 0xff2b2b : 0xffffff;
+        const s1 = new THREE.Mesh(
+          new THREE.BoxGeometry(2.5, 0.11, 0.35),
+          new THREE.MeshBasicMaterial({ color })
+        );
+        const s2 = s1.clone();
+
+        const x = -length/2 + i * (length / stripeCount) + 1.25;
+        s1.position.set(x, 0.055, -width/2 + 0.3);
+        s2.position.set(x, 0.055,  width/2 - 0.3);
+        group.add(s1, s2);
+      }
+
+      return group;
+    }
+
+    const segLong = makeRoadSegment(220, 8);
+    const segShort = makeRoadSegment(120, 8);
+
+    const loop = new THREE.Group();
+    // Arrange rectangle: long Z+, short X+, long Z-, short X-
+    const a = segLong.clone(); a.position.set(0, 0.05, -60);
+    const b = segShort.clone(); b.rotation.y =  Math.PI/2; b.position.set(110, 0.05, 0);
+    const c = segLong.clone(); c.position.set(0, 0.05, 60);
+    const d = segShort.clone(); d.rotation.y =  Math.PI/2; d.position.set(-110, 0.05, 0);
+    loop.add(a, b, c, d);
+
+    trackGroup.add(loop);
+
+    // Simple buildings along sides
+    function addBuildingsLine(x, zStart, zEnd, step, side = 1) {
+      for (let z = zStart; z <= zEnd; z += step) {
+        const w = 8 + Math.random() * 6;
+        const d = 8 + Math.random() * 6;
+        const h = 12 + Math.random() * 30;
+        const geo = new THREE.BoxGeometry(w, h, d);
+        const mat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color().setHSL(0.6 + Math.random()*0.1, 0.2, 0.25 + Math.random()*0.1),
+          roughness: 0.9, metalness: 0.0
+        });
+        const m = new THREE.Mesh(geo, mat);
+        m.castShadow = true; m.receiveShadow = true;
+        m.position.set(x + side*(6 + w/2), h/2, z + (Math.random()-0.5)*3);
+        scene.add(m);
+      }
+    }
+    // Along long segments
+    addBuildingsLine(0, -150, -20, 18, 1);
+    addBuildingsLine(0, -150, -20, 18, -1);
+    addBuildingsLine(0, 20, 150, 18, 1);
+    addBuildingsLine(0, 20, 150, 18, -1);
+    // Along short segments
+    function addBuildingsX(z, xStart, xEnd, step, forward = true) {
+      for (let x = xStart; x <= xEnd; x += step) {
+        const w = 8 + Math.random() * 6;
+        const d = 8 + Math.random() * 6;
+        const h = 12 + Math.random() * 30;
+        const geo = new THREE.BoxGeometry(w, h, d);
+        const mat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color().setHSL(0.58 + Math.random()*0.1, 0.2, 0.28 + Math.random()*0.1),
+          roughness: 0.9, metalness: 0.0
+        });
+        const m = new THREE.Mesh(geo, mat);
+        m.castShadow = true; m.receiveShadow = true;
+        const shift = 6 + d/2;
+        m.position.set(x + (Math.random()-0.5)*3, h/2, z + (forward ? -shift : shift));
+        scene.add(m);
+      }
+    }
+    addBuildingsX(0, -150, -20, 18, true);
+    addBuildingsX(0, 20, 150, 18, false);
+
+    // Street lights along the outer edges
+    function addStreetLightsAlongZ(x, zStart, zEnd, step, side = 1) {
+      for (let z = zStart; z <= zEnd; z += step) {
+        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 5, 8),
+          new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.7, roughness: 0.4 }));
+        pole.castShadow = true; pole.receiveShadow = true;
+        pole.position.set(x + side*(5.5), 2.5, z);
+
+        const arm = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 0.1),
+          new THREE.MeshStandardMaterial({ color: 0x999999, metalness: 0.7, roughness: 0.4 }));
+        arm.position.set(0.8*side, 2.0, 0);
+        pole.add(arm);
+
+        const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 12),
+          new THREE.MeshStandardMaterial({ emissive: 0xffe5a8, emissiveIntensity: 1.5, color: 0x222222 }));
+        bulb.position.set(1.6*side, 2.0, 0);
+        pole.add(bulb);
+
+        const light = new THREE.SpotLight(0xfff2cc, 1.0, 18, Math.PI/5, 0.4, 1.5);
+        light.position.set(1.6*side, 2.0, 0);
+        light.target.position.set(1.6*side, 0.0, 0.0);
+        light.castShadow = true;
+        pole.add(light);
+        pole.add(light.target);
+
+        scene.add(pole);
+      }
+    }
+    addStreetLightsAlongZ(0, -140, -30, 18, 1);
+    addStreetLightsAlongZ(0, -140, -30, 18, -1);
+    addStreetLightsAlongZ(0, 30, 140, 18, 1);
+    addStreetLightsAlongZ(0, 30, 140, 18, -1);
+
+    function addStreetLightsAlongX(z, xStart, xEnd, step, side = 1) {
+      for (let x = xStart; x <= xEnd; x += step) {
+        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 5, 8),
+          new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.7, roughness: 0.4 }));
+        pole.castShadow = true; pole.receiveShadow = true;
+        pole.position.set(x, 2.5, z + side*(5.5));
+
+        const arm = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 1.6),
+          new THREE.MeshStandardMaterial({ color: 0x999999, metalness: 0.7, roughness: 0.4 }));
+        arm.position.set(0, 2.0, 0.8*side);
+        pole.add(arm);
+
+        const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 12),
+          new THREE.MeshStandardMaterial({ emissive: 0xffe5a8, emissiveIntensity: 1.5, color: 0x222222 }));
+        bulb.position.set(0, 2.0, 1.6*side);
+        pole.add(bulb);
+
+        const light = new THREE.SpotLight(0xfff2cc, 1.0, 18, Math.PI/5, 0.4, 1.5);
+        light.position.set(0, 2.0, 1.6*side);
+        light.target.position.set(0, 0.0, 1.6*side);
+        light.castShadow = true;
+        pole.add(light);
+        pole.add(light.target);
+
+        scene.add(pole);
+      }
+    }
+    addStreetLightsAlongX(0, -100, -30, 18, 1);
+    addStreetLightsAlongX(0, -100, -30, 18, -1);
+    addStreetLightsAlongX(0, 30, 100, 18, 1);
+    addStreetLightsAlongX(0, 30, 100, 18, -1);
+
+    // Traffic lights at four "corners"
+    function addTrafficLight(pos, rotY = 0) {
+      const group = new THREE.Group();
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 6, 10),
+        new THREE.MeshStandardMaterial({ color: 0x666666, metalness: 0.6, roughness: 0.5 }));
+      pole.position.y = 3;
+      pole.castShadow = true; pole.receiveShadow = true;
+      group.add(pole);
+
+      const head = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.6, 0.4),
+        new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.2, roughness: 0.8 }));
+      head.position.set(0.6, 4.2, 0);
+      group.add(head);
+
+      const lampR = new THREE.Mesh(new THREE.SphereGeometry(0.12, 12, 12),
+        new THREE.MeshStandardMaterial({ color: 0x111111, emissive: 0x330000, emissiveIntensity: 0.4 }));
+      const lampY = lampR.clone();
+      const lampG = lampR.clone();
+      lampR.position.set(0.8, 4.65, 0);
+      lampY.position.set(0.8, 4.25, 0);
+      lampG.position.set(0.8, 3.85, 0);
+      group.add(lampR, lampY, lampG);
+
+      // Cycle the lights (simple animation loop)
+      let t = 0;
+      function updateTraffic(dt) {
+        t += dt;
+        const cycle = t % 8;
+        // 0-3 green, 3-4 yellow, 4-8 red
+        lampG.material.emissive = new THREE.Color(cycle < 3 ? 0x00ff00 : 0x002200);
+        lampY.material.emissive = new THREE.Color(cycle >= 3 && cycle < 4 ? 0xffff00 : 0x222200);
+        lampR.material.emissive = new THREE.Color(cycle >= 4 ? 0xff0000 : 0x220000);
+      }
+      trafficUpdaters.push(updateTraffic);
+
+      group.position.copy(pos);
+      group.rotation.y = rotY;
+      scene.add(group);
+    }
+
+    const trafficUpdaters = [];
+    addTrafficLight(new THREE.Vector3(55, 0, -55),  Math.PI/4);
+    addTrafficLight(new THREE.Vector3(-55, 0, -55), -Math.PI/4);
+    addTrafficLight(new THREE.Vector3(55, 0, 55),  -Math.PI/4);
+    addTrafficLight(new THREE.Vector3(-55, 0, 55),  Math.PI/4);
+
+    // Load the car model from three.js examples:
+    // Model path and materials come from the official example:
+    // [threejs.org](https://threejs.org/examples/?q=car#webgl_materials_car)
+    let car;
+    const carGroup = new THREE.Group();
+    scene.add(carGroup);
+
+    const loader = new THREE.GLTFLoader();
+    // The example uses this Ferrari model path:
+    const CAR_URL = '[threejs.org](https://threejs.org/examples/models/gltf/ferrari.glb)';
+
+    loader.load(
+      CAR_URL,
+      (gltf) => {
+        car = gltf.scene;
+        car.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+          }
+        });
+        // Scale and position to road height
+        car.scale.set(0.01, 0.01, 0.01);
+        car.position.set(0, 0.1, -50);
+        car.rotation.y = Math.PI; // face "forward" along +Z towards the first corner
+        carGroup.add(car);
+
+        // Slight camera offset follower
+        target.copy(car.position);
+      },
+      undefined,
+      (err) => {
+        console.error('Error loading car model:', err);
+      }
+    );
+
+    // Simple driving controls (no physics): speed + steering
+    const keys = { ArrowUp:false, ArrowDown:false, ArrowLeft:false, ArrowRight:false, KeyW:false, KeyS:false, KeyA:false, KeyD:false };
+    window.addEventListener('keydown', (e) => {
+      if (keys.hasOwnProperty(e.code)) keys[e.code] = true;
+      if (e.code === 'KeyR' && car) {
+        // Reset the car at start
+        car.position.set(0, 0.1, -50);
+        car.rotation.set(0, Math.PI, 0);
+        velocity = 0;
+        steer = 0;
+      }
+    });
+    window.addEventListener('keyup', (e) => {
+      if (keys.hasOwnProperty(e.code)) keys[e.code] = false;
+    });
+
+    let velocity = 0;     // forward speed
+    let steer = 0;        // current steering angle
+    const maxSpeed = 20;  // units per second
+    const accel = 18;     // acceleration
+    const brake = 24;     // braking/reverse accel
+    const drag = 2.2;     // natural slow-down
+    const maxSteer = 0.9; // radians
+    const steerSpeed = 2.5; // how fast we steer
+
+    // Camera follow
+    const followOffset = new THREE.Vector3(0, 4.2, -8);
+    const target = new THREE.Vector3(0, 0, 0);
+    const tmp = new THREE.Vector3();
+
+    // Loop the world in a bounding box so you can keep driving
+    const loopBounds = new THREE.Box3(
+      new THREE.Vector3(-140, -10, -140),
+      new THREE.Vector3(140, 50, 140)
+    );
+
+    function wrapPosition(obj) {
+      if (!loopBounds.containsPoint(obj.position)) {
+        if (obj.position.x < loopBounds.min.x) obj.position.x = loopBounds.max.x;
+        if (obj.position.x > loopBounds.max.x) obj.position.x = loopBounds.min.x;
+        if (obj.position.z < loopBounds.min.z) obj.position.z = loopBounds.max.z;
+        if (obj.position.z > loopBounds.max.z) obj.position.z = loopBounds.min.z;
+      }
+    }
+
+    // Animation loop
+    const clock = new THREE.Clock();
+    function animate() {
+      const dt = Math.min(clock.getDelta(), 0.033);
+
+      // Update traffic lights
+      for (const u of trafficUpdaters) u(dt);
+
+      // Update car movement
+      if (car) {
+        const forwardKey = keys.ArrowUp || keys.KeyW;
+        const backKey = keys.ArrowDown || keys.KeyS;
+        const leftKey = keys.ArrowLeft || keys.KeyA;
+        const rightKey = keys.ArrowRight || keys.KeyD;
+
+        if (forwardKey) velocity += accel * dt;
+        if (backKey)    velocity -= brake * dt;
+
+        // Apply drag
+        const sign = Math.sign(velocity);
+        const vmag = Math.abs(velocity);
+        const vdrag = Math.max(0, vmag - drag * dt);
+        velocity = vdrag * sign;
+
+        // Clamp speed
+        velocity = THREE.MathUtils.clamp(velocity, -maxSpeed*0.4, maxSpeed);
+
+        // Steering toward input
+        let steerTarget = 0;
+        if (leftKey)  steerTarget += maxSteer;
+        if (rightKey) steerTarget -= maxSteer;
+
+        // Ease steer toward target
+        steer = THREE.MathUtils.damp(steer, steerTarget, steerSpeed, dt);
+
+        // Rotate car based on steering and speed
+        // Turn rate scales with speed
+        const turn = steer * (velocity / maxSpeed);
+        car.rotation.y += turn * dt * 2.2;
+
+        // Move forward along car's facing
+        tmp.set(0, 0, 1).applyEuler(car.rotation).multiplyScalar(velocity * dt);
+        car.position.add(tmp);
+
+        // Keep car above ground
+        car.position.y = 0.1;
+
+        wrapPosition(car);
+
+        // Smooth follow camera
+        const camOffset = followOffset.clone().applyEuler(car.rotation);
+        target.copy(car.position).add(camOffset);
+        camera.position.lerp(target, 1 - Math.pow(0.001, dt)); // smooth
+        controls.target.lerp(car.position.clone().add(new THREE.Vector3(0, 0.9, 0)), 1 - Math.pow(0.001, dt));
+      }
+
+      controls.update();
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+    // Handle resize
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  })();
+  </script>
+</body>
+</html>
